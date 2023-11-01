@@ -1,0 +1,84 @@
+From 62a30455c32bdfb2a113d4708ba8dba57decc9e5 Mon Sep 17 00:00:00 2001
+From: Ondrej Holy <oholy@redhat.com>
+Date: Mon, 20 Jan 2020 13:51:20 +0100
+Subject: [PATCH] core: Always refresh authorization when creating streams
+
+Non-resumable upload streams quite often fail with authorization errors
+as we are probably hitting some limits. The only way currently to deal
+with them is to refresh authorization manually and upload everything
+again as it is not possible to resume the transfer. This is big issue
+for streaming operations provided by GVfs. I have made several tests
+and realized that if we explicitely refresh the authorization before
+the transfer, then those authorization errors doesn't occur. So let's
+always refresh the authorization when constructing the streams and do
+the same for upload streams as well as they are also affected. In theory,
+the resumable streams could solve this better, however they currently
+require content size to be specified at the beginning, which is not
+usable for the streaming operations in GVfs.
+
+Fixes: https://gitlab.gnome.org/GNOME/libgdata/issues/23
+---
+ gdata/gdata-download-stream.c | 13 +++++++++++++
+ gdata/gdata-upload-stream.c   | 14 ++++++++++++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/gdata/gdata-download-stream.c b/gdata/gdata-download-stream.c
+index 5bfd7048..a797de68 100644
+--- a/gdata/gdata-download-stream.c
++++ b/gdata/gdata-download-stream.c
+@@ -855,11 +855,24 @@ static gpointer
+ download_thread (GDataDownloadStream *self)
+ {
+ 	GDataDownloadStreamPrivate *priv = self->priv;
++	GDataAuthorizer *authorizer;
+ 
+ 	g_object_ref (self);
+ 
+ 	g_assert (priv->network_cancellable != NULL);
+ 
++	/* FIXME: Refresh authorization before sending message in order to prevent authorization errors during transfer.
++	 * See: https://gitlab.gnome.org/GNOME/libgdata/issues/23 */
++	authorizer = gdata_service_get_authorizer (priv->service);
++	if (authorizer) {
++		g_autoptr(GError) error = NULL;
++
++		gdata_authorizer_refresh_authorization (authorizer, priv->cancellable, &error);
++		if (error != NULL)
++			g_debug ("Error returned when refreshing authorization: %s", error->message);
++		else
++			gdata_authorizer_process_request (authorizer, priv->authorization_domain, priv->message);
++	}
+ 	/* Connect to the got-headers signal so we can notify clients of the values of content-type and content-length */
+ 	g_signal_connect (priv->message, "got-headers", (GCallback) got_headers_cb, self);
+ 	g_signal_connect (priv->message, "got-chunk", (GCallback) got_chunk_cb, self);
+diff --git a/gdata/gdata-upload-stream.c b/gdata/gdata-upload-stream.c
+index 85807fec..85738fd3 100644
+--- a/gdata/gdata-upload-stream.c
++++ b/gdata/gdata-upload-stream.c
+@@ -1147,9 +1147,23 @@ static gpointer
+ upload_thread (GDataUploadStream *self)
+ {
+ 	GDataUploadStreamPrivate *priv = self->priv;
++	GDataAuthorizer *authorizer;
+ 
+ 	g_assert (priv->cancellable != NULL);
+ 
++	/* FIXME: Refresh authorization before sending message in order to prevent authorization errors during transfer.
++	 * See: https://gitlab.gnome.org/GNOME/libgdata/issues/23 */
++	authorizer = gdata_service_get_authorizer (priv->service);
++	if (authorizer) {
++		g_autoptr(GError) error = NULL;
++
++		gdata_authorizer_refresh_authorization (authorizer, priv->cancellable, &error);
++		if (error != NULL)
++			g_debug ("Error returned when refreshing authorization: %s", error->message);
++		else
++			gdata_authorizer_process_request (authorizer, priv->authorization_domain, priv->message);
++	}
++
+ 	while (TRUE) {
+ 		GDataServiceClass *klass;
+ 		gulong wrote_headers_signal, wrote_body_data_signal;
+-- 
+2.36.0
+
